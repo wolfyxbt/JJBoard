@@ -1,0 +1,5 @@
+{
+  "name": "binance-spot-dashboard",
+  "description": "A minimalist, real-time cryptocurrency price tracker using Binance WebSocket API.",
+  "requestFramePermissions": []
+}
