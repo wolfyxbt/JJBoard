@@ -24,6 +24,8 @@ const ALPHA_COLUMN_OPTIONS = [
 
 type AlphaColumnId = typeof ALPHA_COLUMN_OPTIONS[number]['id'];
 type ViewMode = 'market' | 'favorites';
+type SpotFilters = { selectedAssets: string[]; viewMode: ViewMode; searchQuery: string };
+type AlphaFilters = { viewMode: ViewMode; searchQuery: string };
 
 const PINNED_ALPHA_COLUMNS = ['chainIcon', 'tokenIcon', 'token'] as const;
 const PINNED_ALPHA_COLUMN_SET = new Set<AlphaColumnId>(PINNED_ALPHA_COLUMNS);
@@ -73,8 +75,8 @@ const DEFAULT_ALPHA_VISIBLE_COLUMNS = new Set<AlphaColumnId>([
   'change24h',
 ]);
 
-const getSpotFilters = () => {
-  const fallback = { selectedAssets: ['USDT'], viewMode: 'market' as ViewMode, searchQuery: '' };
+const getSpotFilters = (): SpotFilters => {
+  const fallback: SpotFilters = { selectedAssets: ['USDT'], viewMode: 'market', searchQuery: '' };
   if (typeof window === 'undefined') return fallback;
   try {
     const raw = localStorage.getItem(SPOT_FILTERS_KEY);
@@ -83,7 +85,7 @@ const getSpotFilters = () => {
     const selectedAssets = Array.isArray(parsed?.selectedAssets)
       ? parsed!.selectedAssets.filter((asset) => typeof asset === 'string')
       : fallback.selectedAssets;
-    const viewMode = parsed?.viewMode === 'favorites' ? 'favorites' : 'market';
+    const viewMode: ViewMode = parsed?.viewMode === 'favorites' ? 'favorites' : 'market';
     const searchQuery = typeof parsed?.searchQuery === 'string' ? parsed.searchQuery : '';
     return {
       selectedAssets: selectedAssets.length ? selectedAssets : fallback.selectedAssets,
@@ -95,14 +97,14 @@ const getSpotFilters = () => {
   }
 };
 
-const getAlphaFilters = () => {
-  const fallback = { viewMode: 'market' as ViewMode, searchQuery: '' };
+const getAlphaFilters = (): AlphaFilters => {
+  const fallback: AlphaFilters = { viewMode: 'market', searchQuery: '' };
   if (typeof window === 'undefined') return fallback;
   try {
     const raw = localStorage.getItem(ALPHA_FILTERS_KEY);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<typeof fallback> | null;
-    const viewMode = parsed?.viewMode === 'favorites' ? 'favorites' : 'market';
+    const viewMode: ViewMode = parsed?.viewMode === 'favorites' ? 'favorites' : 'market';
     const searchQuery = typeof parsed?.searchQuery === 'string' ? parsed.searchQuery : '';
     return { viewMode, searchQuery };
   } catch {
