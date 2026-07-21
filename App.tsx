@@ -311,10 +311,12 @@ const App = () => {
         };
 
         // Define strategies to try in order.
-        // 1. Local Proxy (defined in vite.config.ts)
-        // 2. CorsProxy.io (Robust public proxy)
-        // 3. AllOrigins (Fallback public proxy)
+        // 1. Vercel Serverless Proxy (api/alpha.js — production)
+        // 2. Local Proxy (defined in vite.config.ts — dev only)
+        // 3. CorsProxy.io (public proxy; requires registered origin, often 403)
+        // 4. AllOrigins (public proxy; currently blocked by Binance WAF)
         const strategies = [
+          '/api/alpha',
           apiPath,
           `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
           `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`
@@ -800,19 +802,27 @@ const App = () => {
 
           {/* Alpha Table */}
           <main className="flex-1 min-h-0 w-full max-w-7xl mx-auto px-4 pb-4 overflow-hidden">
-            <VirtualTable 
-              data={filteredAlphaData} 
-              height="100%" 
-              favorites={favorites}
-              onToggleFavorite={toggleFavorite}
-              hiddenColumns={alphaHiddenColumns}
-              showIconColumn
-              showChainIconColumn
-              showAlphaDetails
-              columnOrder={alphaColumnOrder}
-              widthRefreshKey={alphaWidthRefreshKey}
-              widthSourceData={alphaData}
-            />
+            {alphaData.length === 0 ? (
+              <div className="h-full w-full flex items-center justify-center text-sm font-medium text-gray-400">
+                {alphaApiStatus === 'Alpha API unavailable'
+                  ? 'Alpha API unavailable — all data sources failed'
+                  : 'Loading Alpha data...'}
+              </div>
+            ) : (
+              <VirtualTable
+                data={filteredAlphaData}
+                height="100%"
+                favorites={favorites}
+                onToggleFavorite={toggleFavorite}
+                hiddenColumns={alphaHiddenColumns}
+                showIconColumn
+                showChainIconColumn
+                showAlphaDetails
+                columnOrder={alphaColumnOrder}
+                widthRefreshKey={alphaWidthRefreshKey}
+                widthSourceData={alphaData}
+              />
+            )}
           </main>
         </>
       ) : (
