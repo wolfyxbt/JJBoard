@@ -28,6 +28,14 @@ const toNum = (value: unknown): number | undefined => {
   return Number.isFinite(num) ? num : undefined;
 };
 
+// Networks that block binance.com domains often make connections HANG rather
+// than fail fast — without a timeout the proxy fallback would never run.
+const fetchWithTimeout = (url: string, timeoutMs = 8000): Promise<Response> => {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(id));
+};
+
 type DataSource = 'direct' | 'proxy';
 
 export class BinanceFuturesService {
@@ -45,6 +53,7 @@ export class BinanceFuturesService {
   private wsEverOpened = false;
   private pollIntervalId: any = null;
   private snapshotPromise: Promise<void> | null = null;
+  private wsConnectTimeoutId: any = null;
 
   // Symbols confirmed as TRADING PERPETUAL contracts via exchangeInfo.
   // Empty set means exchangeInfo failed — fall back to heuristic filtering.
@@ -107,9 +116,9 @@ export class BinanceFuturesService {
 
   private async fetchSnapshotDirect(): Promise<boolean> {
     const [tickerRes, exchangeInfoRes, premiumRes] = await Promise.all([
-      fetch(`${FAPI_BASE}/fapi/v1/ticker/24hr`),
-      fetch(`${FAPI_BASE}/fapi/v1/exchangeInfo`),
-      fetch(`${FAPI_BASE}/fapi/v1/premiumIndex`),
+      fetchWithTimeout(`${FAPI_BASE}/fapi/v1/ticker/24hr`),
+      fetchWithTimeout(`${FAPI_BASE}/fapi/v1/exchangeInfo`),
+      fetchWithTimeout(`${FAPI_BASE}/fapi/v1/premiumIndex`),
     ]);
 
     if (exchangeInfoRes.ok) {
@@ -142,7 +151,7 @@ export class BinanceFuturesService {
   }
 
   private async fetchSnapshotProxy(): Promise<boolean> {
-    const res = await fetch(PROXY_PATH);
+    const res = await fetchWithTimeout(PROXY_PATH, 12000);
     if (!res.ok) return false;
     const contentType = res.headers.get('content-type');
     if (!contentType || !contentType.includes('application/json')) return false;
@@ -188,6 +197,9 @@ export class BinanceFuturesService {
         if (await this.fetchSnapshotProxy()) {
           this.dataSource = 'proxy';
           console.log('[Perp] Using serverless proxy for futures data');
+          // If direct REST is blocked, the WebSocket almost certainly is too —
+          // keep data fresh via polling now instead of waiting for WS failures.
+          this.startPollingFallback();
           this.emitStatus();
           this.notify();
           return;
@@ -238,7 +250,7 @@ export class BinanceFuturesService {
       const url = this.dataSource === 'proxy'
         ? `${PROXY_PATH}?symbol=${target}`
         : `${FAPI_BASE}/fapi/v1/openInterest?symbol=${target}`;
-      const res = await fetch(url);
+      const res = await fetchWithTimeout(url);
       // Record the attempt even on failure so one bad symbol can't stall the queue
       this.oiFetchedAt.set(target, Date.now());
       if (!res.ok) return;
@@ -302,8 +314,22 @@ export class BinanceFuturesService {
       return;
     }
 
+    // Blocked networks can leave the handshake hanging in CONNECTING forever —
+    // force a close so the reconnect/polling logic keeps moving.
+    if (this.wsConnectTimeoutId) clearTimeout(this.wsConnectTimeoutId);
+    this.wsConnectTimeoutId = setTimeout(() => {
+      if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
+        console.log('[Perp] WebSocket handshake timed out');
+        this.ws.close();
+      }
+    }, 10000);
+
     this.ws.onopen = () => {
       console.log('[Perp] WebSocket connected');
+      if (this.wsConnectTimeoutId) {
+        clearTimeout(this.wsConnectTimeoutId);
+        this.wsConnectTimeoutId = null;
+      }
       const isReconnect = this.wsEverOpened;
       this.reconnectAttempt = 0;
       this.wsEverOpened = true;
@@ -359,6 +385,10 @@ export class BinanceFuturesService {
 
     this.ws.onclose = (event) => {
       console.log(`[Perp] WebSocket closed (code: ${event.code})`);
+      if (this.wsConnectTimeoutId) {
+        clearTimeout(this.wsConnectTimeoutId);
+        this.wsConnectTimeoutId = null;
+      }
       this.ws = null;
       this.emitStatus();
       this.scheduleReconnect();
@@ -403,6 +433,11 @@ export class BinanceFuturesService {
     } catch (e) {
       displayUrl = fullUrl.split('?')[0];
     }
+    if (this.dataSource === 'proxy') {
+      displayUrl = this.pollIntervalId
+        ? `${PROXY_PATH} (serverless proxy, polling)`
+        : `${PROXY_PATH} (serverless proxy)`;
+    }
     const targets = specificCallback ? [specificCallback] : this.statusSubscribers;
     targets.forEach((cb) => cb(displayUrl));
   }
@@ -428,6 +463,10 @@ export class BinanceFuturesService {
     if (this.reconnectTimeoutId) {
       clearTimeout(this.reconnectTimeoutId);
       this.reconnectTimeoutId = null;
+    }
+    if (this.wsConnectTimeoutId) {
+      clearTimeout(this.wsConnectTimeoutId);
+      this.wsConnectTimeoutId = null;
     }
     this.stopPollingFallback();
     if (this.ws) {

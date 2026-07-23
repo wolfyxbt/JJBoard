@@ -981,10 +981,15 @@ const App = () => {
           {/* Perp Table */}
           <main className="flex-1 min-h-0 w-full max-w-7xl mx-auto px-4 pb-4 overflow-hidden">
             {perpDataMap.size === 0 ? (
-              <div className="h-full w-full flex items-center justify-center text-sm font-medium text-gray-400">
-                {perpApiStatus === 'unavailable'
-                  ? 'Perp API unavailable — all data sources failed'
-                  : 'Loading Perp data...'}
+              <div className="h-full w-full flex flex-col items-center justify-center gap-2 text-sm font-medium text-gray-400">
+                <span>
+                  {perpApiStatus === 'unavailable'
+                    ? 'Perp API unavailable — all data sources failed'
+                    : 'Loading Perp data...'}
+                </span>
+                {perpApiStatus && perpApiStatus !== 'unavailable' && (
+                  <span className="text-xs text-gray-300 font-mono">{perpApiStatus}</span>
+                )}
               </div>
             ) : (
               <VirtualTable
