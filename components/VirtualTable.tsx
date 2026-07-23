@@ -89,6 +89,7 @@ const formatCountdown = (nextFundingTime: number | undefined) => {
   const diff = nextFundingTime - Date.now();
   if (diff <= 0) return 'soon';
   const totalMinutes = Math.floor(diff / 60000);
+  if (totalMinutes === 0) return '<1m';
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
@@ -298,19 +299,21 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
       const change24hWidth = measureText(formatPercent(item.changePercent24h), FONT_MONO_15);
       if (change24hWidth > maxChange24hWidth) maxChange24hWidth = change24hWidth;
 
-      const markPriceWidth = item.markPrice === undefined
-        ? 0
-        : measureText(formatPrice(item.markPrice), FONT_MONO_15);
-      if (markPriceWidth > maxMarkPriceWidth) maxMarkPriceWidth = markPriceWidth;
+      if (showPerpDetails) {
+        const markPriceWidth = item.markPrice === undefined
+          ? 0
+          : measureText(formatPrice(item.markPrice), FONT_MONO_15);
+        if (markPriceWidth > maxMarkPriceWidth) maxMarkPriceWidth = markPriceWidth;
 
-      const fundingWidth = measureText(formatFundingRate(item.fundingRate), FONT_MONO_14);
-      if (fundingWidth > maxFundingWidth) maxFundingWidth = fundingWidth;
+        const fundingWidth = measureText(formatFundingRate(item.fundingRate), FONT_MONO_14);
+        if (fundingWidth > maxFundingWidth) maxFundingWidth = fundingWidth;
 
-      const oiWidth = measureText(formatVolume(item.openInterestValue ?? 0), FONT_MONO_15);
-      if (oiWidth > maxOiWidth) maxOiWidth = oiWidth;
+        const oiWidth = measureText(formatVolume(item.openInterestValue ?? 0), FONT_MONO_15);
+        if (oiWidth > maxOiWidth) maxOiWidth = oiWidth;
+      }
     });
 
-    const sampleCountdownWidth = measureText('23h 59m', FONT_MONO_14);
+    const sampleCountdownWidth = showPerpDetails ? measureText('23h 59m', FONT_MONO_14) : 0;
 
     const sampleListingWidth = measureText(formatDate(Date.now()), FONT_MONO_14);
     if (sampleListingWidth > maxListingWidth) maxListingWidth = sampleListingWidth;
@@ -400,7 +403,7 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
     };
 
     setColumnWidths(nextWidths);
-  }, [widthRefreshKey, showAlphaDetails, measureContext, widthSourceData, data]);
+  }, [widthRefreshKey, showAlphaDetails, showPerpDetails, measureContext, widthSourceData, data]);
 
   const sortedData = useMemo(() => {
     return [...data].sort((a, b) => {
@@ -443,8 +446,14 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
     });
   }, [data, sortField, sortDirection]);
 
+  const lastSortedIdsRef = useRef('');
   useEffect(() => {
-    if (onSortedIdsChange) onSortedIdsChange(sortedData.map(d => d.symbol));
+    if (!onSortedIdsChange) return;
+    const ids = sortedData.map(d => d.symbol);
+    const key = ids.join(' ');
+    if (key === lastSortedIdsRef.current) return;
+    lastSortedIdsRef.current = key;
+    onSortedIdsChange(ids);
   }, [sortedData]);
 
   const totalHeight = sortedData.length * ROW_HEIGHT;

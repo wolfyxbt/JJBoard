@@ -1,5 +1,5 @@
 
-import React, { useEffect, useState, useMemo, useRef } from 'react';
+import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import { binanceService, getQuoteAsset } from './services/binanceService';
 import { binanceFuturesService } from './services/binanceFuturesService';
 import { TickerData } from './types';
@@ -220,12 +220,17 @@ const App = () => {
   const [alphaColumnOrder, setAlphaColumnOrder] = useState<AlphaColumnId[]>(getAlphaColumnOrder);
 
   // State for Perp Tab
-  const perpFilters = getPerpFilters();
   const [perpDataMap, setPerpDataMap] = useState<Map<string, TickerData>>(new Map());
-  const [perpViewMode, setPerpViewMode] = useState<ViewMode>(perpFilters.viewMode);
-  const [perpSearchQuery, setPerpSearchQuery] = useState(perpFilters.searchQuery);
-  const [perpSortedSymbols, setPerpSortedSymbols] = useState<string[]>([]);
+  const [perpViewMode, setPerpViewMode] = useState<ViewMode>(() => getPerpFilters().viewMode);
+  const [perpSearchQuery, setPerpSearchQuery] = useState(() => getPerpFilters().searchQuery);
+  const [perpApiStatus, setPerpApiStatus] = useState('');
   const [perpWidthRefreshKey, setPerpWidthRefreshKey] = useState(0);
+  // Ref (not state): the OI polling interval reads this without needing to be
+  // torn down every time the table re-sorts.
+  const perpSortedSymbolsRef = useRef<string[]>([]);
+  const handlePerpSortedIds = useCallback((ids: string[]) => {
+    perpSortedSymbolsRef.current = ids;
+  }, []);
   const [perpFavorites, setPerpFavorites] = useState<Set<string>>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem(PERP_FAVORITES_KEY);
@@ -334,29 +339,35 @@ const App = () => {
     localStorage.setItem(ALPHA_COLUMN_ORDER_KEY, JSON.stringify(alphaColumnOrder));
   }, [alphaColumnOrder]);
 
-  // Perp: subscribe on mount, connect lazily on first visit to the tab
+  // Perp: only subscribe while the tab is visible, so the ~1/s futures
+  // stream doesn't re-render the whole app from other tabs. The singleton
+  // service keeps accumulating data in the background either way.
   useEffect(() => {
+    if (activeTab !== 'perp') return;
+    binanceFuturesService.connect();
     const unsubscribe = binanceFuturesService.subscribe((data) => {
       setPerpDataMap(data);
     });
+    return () => unsubscribe();
+  }, [activeTab]);
+
+  useEffect(() => {
+    const unsubscribeStatus = binanceFuturesService.subscribeStatus(setPerpApiStatus);
     return () => {
-      unsubscribe();
+      unsubscribeStatus();
       binanceFuturesService.disconnect();
     };
   }, []);
 
-  useEffect(() => {
-    if (activeTab === 'perp') binanceFuturesService.connect();
-  }, [activeTab]);
-
   // Perp: lazy-fill open interest, one symbol at a time in display order
   useEffect(() => {
-    if (activeTab !== 'perp' || perpSortedSymbols.length === 0) return;
+    if (activeTab !== 'perp') return;
     const intervalId = setInterval(() => {
-      binanceFuturesService.fetchNextOpenInterest(perpSortedSymbols);
+      if (perpSortedSymbolsRef.current.length === 0) return;
+      binanceFuturesService.fetchNextOpenInterest(perpSortedSymbolsRef.current);
     }, 300);
     return () => clearInterval(intervalId);
-  }, [activeTab, perpSortedSymbols]);
+  }, [activeTab]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -971,7 +982,9 @@ const App = () => {
           <main className="flex-1 min-h-0 w-full max-w-7xl mx-auto px-4 pb-4 overflow-hidden">
             {perpDataMap.size === 0 ? (
               <div className="h-full w-full flex items-center justify-center text-sm font-medium text-gray-400">
-                Loading Perp data...
+                {perpApiStatus === 'unavailable'
+                  ? 'Perp API unavailable — all data sources failed'
+                  : 'Loading Perp data...'}
               </div>
             ) : (
               <VirtualTable
@@ -979,7 +992,7 @@ const App = () => {
                 height="100%"
                 favorites={perpFavorites}
                 onToggleFavorite={togglePerpFavorite}
-                onSortedIdsChange={setPerpSortedSymbols}
+                onSortedIdsChange={handlePerpSortedIds}
                 hiddenColumns={['change1h', 'change4h']}
                 showPerpDetails
                 widthRefreshKey={perpWidthRefreshKey}
