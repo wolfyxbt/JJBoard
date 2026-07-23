@@ -1,8 +1,11 @@
 
 import { BinanceTickerWS, BinanceMarkPriceWS, TickerData, BinanceStreamMessage } from '../types';
 
-// USDT-M futures has no public data-only mirror (unlike spot's binance.vision)
+// USDT-M futures has no public data-only mirror (unlike spot's binance.vision),
+// and fapi geo-blocks some regions (HTTP 451, e.g. US) — those visitors fall
+// back to the /api/perp serverless proxy pinned to an allowed region.
 const FAPI_BASE = 'https://fapi.binance.com';
+const PROXY_PATH = '/api/perp';
 
 // Combined stream: all-market 24h tickers + all-market mark price / funding rate
 const STREAMS = '?streams=!ticker@arr/!markPrice@arr';
@@ -12,6 +15,18 @@ const BASE_WS_URLS = [
 
 // Re-fetch a symbol's open interest once it is older than this
 const OI_STALE_MS = 3 * 60 * 1000;
+// REST polling cadence when the WebSocket cannot connect (geo-blocked regions)
+const POLL_INTERVAL_MS = 15000;
+
+// Binance sends numeric values as strings; funding fields can be "" for
+// non-funding symbols, so guard against NaN everywhere.
+const toNum = (value: unknown): number | undefined => {
+  if (value === undefined || value === null || value === '') return undefined;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : undefined;
+};
+
+type DataSource = 'direct' | 'proxy';
 
 export class BinanceFuturesService {
   private ws: WebSocket | null = null;
@@ -24,6 +39,10 @@ export class BinanceFuturesService {
   private endpointIndex = 0;
   private started = false;
 
+  private dataSource: DataSource = 'direct';
+  private wsEverOpened = false;
+  private pollIntervalId: any = null;
+
   // Symbols confirmed as TRADING PERPETUAL contracts via exchangeInfo.
   // Empty set means exchangeInfo failed — fall back to heuristic filtering.
   private perpSymbols: Set<string> = new Set();
@@ -34,7 +53,7 @@ export class BinanceFuturesService {
   public connect() {
     if (this.started) return;
     this.started = true;
-    this.fetchInitialSnapshot();
+    this.fetchSnapshot();
     this.connectWebSocket();
   }
 
@@ -49,63 +68,115 @@ export class BinanceFuturesService {
     return !symbol.includes('_');
   }
 
-  private async fetchInitialSnapshot() {
-    console.log('[Perp] Starting snapshot fetch...');
-    try {
-      const [tickerRes, exchangeInfoRes, premiumRes] = await Promise.all([
-        fetch(`${FAPI_BASE}/fapi/v1/ticker/24hr`),
-        fetch(`${FAPI_BASE}/fapi/v1/exchangeInfo`),
-        fetch(`${FAPI_BASE}/fapi/v1/premiumIndex`),
-      ]);
+  private applyTicker(item: any) {
+    if (!this.isPerpSymbol(item.symbol)) return;
+    const price = toNum(item.lastPrice);
+    if (price === undefined) return;
+    const existing = this.tickerMap.get(item.symbol);
+    this.tickerMap.set(item.symbol, {
+      ...existing,
+      symbol: item.symbol,
+      price,
+      volume: toNum(item.quoteVolume) ?? 0,
+      changePercent24h: toNum(item.priceChangePercent) ?? 0,
+    });
+  }
 
-      if (exchangeInfoRes.ok) {
-        const exchangeInfo = await exchangeInfoRes.json();
-        if (Array.isArray(exchangeInfo.symbols)) {
-          exchangeInfo.symbols.forEach((s: any) => {
-            if (s.status === 'TRADING' && s.contractType === 'PERPETUAL') {
-              this.perpSymbols.add(s.symbol);
-            }
-          });
-        }
-      }
+  private applyPremium(item: any) {
+    const existing = this.tickerMap.get(item.symbol);
+    if (!existing) return; // Only enrich symbols already accepted as perps
+    existing.markPrice = toNum(item.markPrice);
+    existing.indexPrice = toNum(item.indexPrice);
+    existing.fundingRate = toNum(item.lastFundingRate);
+    const nextFunding = toNum(item.nextFundingTime);
+    existing.nextFundingTime = nextFunding && nextFunding > 0 ? nextFunding : undefined;
+    this.tickerMap.set(item.symbol, existing);
+  }
 
-      if (tickerRes.ok) {
-        const tickerData = await tickerRes.json();
-        if (Array.isArray(tickerData)) {
-          tickerData.forEach((item: any) => {
-            if (!this.isPerpSymbol(item.symbol)) return;
-            if (Number(item.count) === 0) return;
-            const existing = this.tickerMap.get(item.symbol);
-            this.tickerMap.set(item.symbol, {
-              ...existing,
-              symbol: item.symbol,
-              price: parseFloat(item.lastPrice),
-              volume: parseFloat(item.quoteVolume),
-              changePercent24h: parseFloat(item.priceChangePercent),
-            });
-          });
-        }
-      }
+  private async fetchSnapshotDirect(): Promise<boolean> {
+    const [tickerRes, exchangeInfoRes, premiumRes] = await Promise.all([
+      fetch(`${FAPI_BASE}/fapi/v1/ticker/24hr`),
+      fetch(`${FAPI_BASE}/fapi/v1/exchangeInfo`),
+      fetch(`${FAPI_BASE}/fapi/v1/premiumIndex`),
+    ]);
 
-      if (premiumRes.ok) {
-        const premiumData = await premiumRes.json();
-        const entries = Array.isArray(premiumData) ? premiumData : [premiumData];
-        entries.forEach((item: any) => {
-          const existing = this.tickerMap.get(item.symbol);
-          if (!existing) return; // Only enrich symbols already accepted as perps
-          existing.markPrice = parseFloat(item.markPrice);
-          existing.indexPrice = parseFloat(item.indexPrice);
-          existing.fundingRate = parseFloat(item.lastFundingRate);
-          existing.nextFundingTime = Number(item.nextFundingTime) || undefined;
-          this.tickerMap.set(item.symbol, existing);
+    if (exchangeInfoRes.ok) {
+      const exchangeInfo = await exchangeInfoRes.json();
+      if (Array.isArray(exchangeInfo.symbols)) {
+        exchangeInfo.symbols.forEach((s: any) => {
+          if (s.status === 'TRADING' && s.contractType === 'PERPETUAL') {
+            this.perpSymbols.add(s.symbol);
+          }
         });
       }
+    }
 
-      console.log(`[Perp] Snapshot loaded ${this.tickerMap.size} perpetual contracts`);
+    if (!tickerRes.ok) return false;
+    const tickerData = await tickerRes.json();
+    if (!Array.isArray(tickerData)) return false;
+    tickerData.forEach((item: any) => {
+      if (Number(item.count) === 0) return;
+      this.applyTicker(item);
+    });
+
+    if (premiumRes.ok) {
+      const premiumData = await premiumRes.json();
+      const entries = Array.isArray(premiumData) ? premiumData : [premiumData];
+      entries.forEach((item: any) => this.applyPremium(item));
+    }
+
+    return this.tickerMap.size > 0;
+  }
+
+  private async fetchSnapshotProxy(): Promise<boolean> {
+    const res = await fetch(PROXY_PATH);
+    if (!res.ok) return false;
+    const contentType = res.headers.get('content-type');
+    if (!contentType || !contentType.includes('application/json')) return false;
+    const json = await res.json();
+    if (!Array.isArray(json.tickers)) return false;
+
+    if (Array.isArray(json.perpSymbols)) {
+      json.perpSymbols.forEach((symbol: string) => this.perpSymbols.add(symbol));
+    }
+    json.tickers.forEach((item: any) => {
+      if (Number(item.count) === 0) return;
+      this.applyTicker(item);
+    });
+    if (Array.isArray(json.premium)) {
+      json.premium.forEach((item: any) => this.applyPremium(item));
+    }
+
+    return this.tickerMap.size > 0;
+  }
+
+  private async fetchSnapshot() {
+    try {
+      if (this.dataSource === 'direct') {
+        try {
+          if (await this.fetchSnapshotDirect()) {
+            this.notify();
+            return;
+          }
+        } catch (e) {
+          console.warn('[Perp] Direct snapshot failed (possibly geo-blocked), trying proxy...', e);
+        }
+        if (await this.fetchSnapshotProxy()) {
+          this.dataSource = 'proxy';
+          console.log('[Perp] Using serverless proxy for futures data');
+          this.notify();
+          return;
+        }
+      } else {
+        if (await this.fetchSnapshotProxy()) {
+          this.notify();
+          return;
+        }
+      }
+      console.warn('[Perp] All snapshot sources failed, waiting for WebSocket data...');
       this.notify();
     } catch (e) {
-      console.warn('[Perp] Snapshot fetch failed, waiting for WebSocket data...', e);
-      // WebSocket !ticker@arr will still populate the table over time
+      console.warn('[Perp] Snapshot fetch failed', e);
       this.notify();
     }
   }
@@ -124,14 +195,17 @@ export class BinanceFuturesService {
 
     this.oiFetchInFlight = true;
     try {
-      const res = await fetch(`${FAPI_BASE}/fapi/v1/openInterest?symbol=${target}`);
+      const url = this.dataSource === 'proxy'
+        ? `${PROXY_PATH}?symbol=${target}`
+        : `${FAPI_BASE}/fapi/v1/openInterest?symbol=${target}`;
+      const res = await fetch(url);
       // Record the attempt even on failure so one bad symbol can't stall the queue
       this.oiFetchedAt.set(target, Date.now());
       if (!res.ok) return;
       const json = await res.json();
       const item = this.tickerMap.get(target);
-      const oi = parseFloat(json.openInterest);
-      if (item && Number.isFinite(oi)) {
+      const oi = toNum(json.openInterest);
+      if (item && oi !== undefined) {
         item.openInterest = oi;
         const refPrice = item.markPrice ?? item.price;
         item.openInterestValue = refPrice ? oi * refPrice : undefined;
@@ -142,6 +216,27 @@ export class BinanceFuturesService {
       this.oiFetchedAt.set(target, Date.now());
     } finally {
       this.oiFetchInFlight = false;
+    }
+  }
+
+  // When the WebSocket handshake keeps failing (geo-blocked visitors see
+  // opaque connection errors), keep the table alive with REST polling.
+  private startPollingFallback() {
+    if (this.pollIntervalId) return;
+    console.log('[Perp] WebSocket unavailable — starting REST polling fallback');
+    this.pollIntervalId = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.stopPollingFallback();
+        return;
+      }
+      this.fetchSnapshot();
+    }, POLL_INTERVAL_MS);
+  }
+
+  private stopPollingFallback() {
+    if (this.pollIntervalId) {
+      clearInterval(this.pollIntervalId);
+      this.pollIntervalId = null;
     }
   }
 
@@ -170,6 +265,8 @@ export class BinanceFuturesService {
     this.ws.onopen = () => {
       console.log('[Perp] WebSocket connected');
       this.reconnectAttempt = 0;
+      this.wsEverOpened = true;
+      this.stopPollingFallback();
       this.emitStatus();
     };
 
@@ -184,10 +281,11 @@ export class BinanceFuturesService {
             if (!this.isPerpSymbol(item.s)) return;
             const existing = this.tickerMap.get(item.s);
             if (!existing) return; // Wait for a ticker event to create the row
-            existing.markPrice = parseFloat(item.p);
-            existing.indexPrice = parseFloat(item.i);
-            existing.fundingRate = parseFloat(item.r);
-            existing.nextFundingTime = item.T || undefined;
+            existing.markPrice = toNum(item.p);
+            existing.indexPrice = toNum(item.i);
+            existing.fundingRate = toNum(item.r);
+            const nextFunding = toNum(item.T);
+            existing.nextFundingTime = nextFunding && nextFunding > 0 ? nextFunding : undefined;
             if (existing.openInterest !== undefined && existing.markPrice) {
               existing.openInterestValue = existing.openInterest * existing.markPrice;
             }
@@ -202,9 +300,9 @@ export class BinanceFuturesService {
               volume: 0,
               changePercent24h: 0,
             };
-            existing.price = parseFloat(item.c);
-            existing.volume = parseFloat(item.q);
-            existing.changePercent24h = parseFloat(item.P);
+            existing.price = toNum(item.c) ?? existing.price;
+            existing.volume = toNum(item.q) ?? existing.volume;
+            existing.changePercent24h = toNum(item.P) ?? existing.changePercent24h;
             this.tickerMap.set(item.s, existing);
           });
         }
@@ -270,6 +368,11 @@ export class BinanceFuturesService {
     this.emitStatus();
     const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempt), this.maxReconnectDelay);
     this.reconnectAttempt++;
+    // After a couple of failed handshakes with no successful connection ever,
+    // assume the region is blocked and keep data flowing via REST polling.
+    if (!this.wsEverOpened && this.reconnectAttempt >= 2) {
+      this.startPollingFallback();
+    }
     if (this.reconnectTimeoutId) clearTimeout(this.reconnectTimeoutId);
     console.log(`[Perp] Reconnecting in ${delay}ms`);
     this.reconnectTimeoutId = setTimeout(() => {
@@ -282,6 +385,7 @@ export class BinanceFuturesService {
       clearTimeout(this.reconnectTimeoutId);
       this.reconnectTimeoutId = null;
     }
+    this.stopPollingFallback();
     if (this.ws) {
       this.ws.onclose = null;
       this.ws.onerror = null;
