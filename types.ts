@@ -15,6 +15,16 @@ export interface BinanceTickerWS {
   e?: string; // Event type (e.g., "24hrTicker", "1hTicker")
 }
 
+// Futures !markPrice@arr stream payload
+export interface BinanceMarkPriceWS {
+  e: string; // Event type "markPriceUpdate"
+  s: string; // Symbol
+  p: string; // Mark price
+  i: string; // Index price
+  r: string; // Funding rate
+  T: number; // Next funding time (ms)
+}
+
 // Normalized application data format
 export interface TickerData {
   symbol: string;
@@ -35,6 +45,12 @@ export interface TickerData {
   circulatingSupply?: number;
   holders?: number;
   listingTime?: number;
+  markPrice?: number;
+  indexPrice?: number;
+  fundingRate?: number;
+  nextFundingTime?: number;
+  openInterest?: number;
+  openInterestValue?: number;
 }
 
 export type SortField =
@@ -52,6 +68,10 @@ export type SortField =
   | 'totalSupply'
   | 'circulatingSupply'
   | 'holders'
-  | 'listingTime';
+  | 'listingTime'
+  | 'markPrice'
+  | 'fundingRate'
+  | 'nextFunding'
+  | 'openInterest';
 export type SortDirection = 'asc' | 'desc';
 // Timeframe type removed as it is no longer needed for state

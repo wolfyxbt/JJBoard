@@ -1,6 +1,7 @@
 
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { binanceService, getQuoteAsset } from './services/binanceService';
+import { binanceFuturesService } from './services/binanceFuturesService';
 import { TickerData } from './types';
 import { VirtualTable } from './components/VirtualTable';
 
@@ -37,6 +38,8 @@ const TAB_PATHS = {
 
 const SPOT_FILTERS_KEY = 'binance_spot_filters';
 const ALPHA_FILTERS_KEY = 'binance_alpha_filters';
+const PERP_FILTERS_KEY = 'binance_perp_filters';
+const PERP_FAVORITES_KEY = 'binance_perp_favorites';
 const ALPHA_COLUMNS_KEY = 'binance_alpha_columns';
 const ALPHA_COLUMN_ORDER_KEY = 'binance_alpha_column_order';
 
@@ -102,6 +105,21 @@ const getAlphaFilters = (): AlphaFilters => {
   if (typeof window === 'undefined') return fallback;
   try {
     const raw = localStorage.getItem(ALPHA_FILTERS_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<typeof fallback> | null;
+    const viewMode: ViewMode = parsed?.viewMode === 'favorites' ? 'favorites' : 'market';
+    const searchQuery = typeof parsed?.searchQuery === 'string' ? parsed.searchQuery : '';
+    return { viewMode, searchQuery };
+  } catch {
+    return fallback;
+  }
+};
+
+const getPerpFilters = (): AlphaFilters => {
+  const fallback: AlphaFilters = { viewMode: 'market', searchQuery: '' };
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = localStorage.getItem(PERP_FILTERS_KEY);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<typeof fallback> | null;
     const viewMode: ViewMode = parsed?.viewMode === 'favorites' ? 'favorites' : 'market';
@@ -201,6 +219,23 @@ const App = () => {
   const [alphaVisibleColumns, setAlphaVisibleColumns] = useState<Set<AlphaColumnId>>(getAlphaColumns);
   const [alphaColumnOrder, setAlphaColumnOrder] = useState<AlphaColumnId[]>(getAlphaColumnOrder);
 
+  // State for Perp Tab
+  const perpFilters = getPerpFilters();
+  const [perpDataMap, setPerpDataMap] = useState<Map<string, TickerData>>(new Map());
+  const [perpViewMode, setPerpViewMode] = useState<ViewMode>(perpFilters.viewMode);
+  const [perpSearchQuery, setPerpSearchQuery] = useState(perpFilters.searchQuery);
+  const [perpSortedSymbols, setPerpSortedSymbols] = useState<string[]>([]);
+  const [perpWidthRefreshKey, setPerpWidthRefreshKey] = useState(0);
+  const [perpFavorites, setPerpFavorites] = useState<Set<string>>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem(PERP_FAVORITES_KEY);
+      if (saved) {
+        try { return new Set(JSON.parse(saved)); } catch (e) { return new Set(); }
+      }
+    }
+    return new Set();
+  });
+
   // Spot Data Effect
   useEffect(() => {
     binanceService.connect();
@@ -298,6 +333,46 @@ const App = () => {
     if (typeof window === 'undefined') return;
     localStorage.setItem(ALPHA_COLUMN_ORDER_KEY, JSON.stringify(alphaColumnOrder));
   }, [alphaColumnOrder]);
+
+  // Perp: subscribe on mount, connect lazily on first visit to the tab
+  useEffect(() => {
+    const unsubscribe = binanceFuturesService.subscribe((data) => {
+      setPerpDataMap(data);
+    });
+    return () => {
+      unsubscribe();
+      binanceFuturesService.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'perp') binanceFuturesService.connect();
+  }, [activeTab]);
+
+  // Perp: lazy-fill open interest, one symbol at a time in display order
+  useEffect(() => {
+    if (activeTab !== 'perp' || perpSortedSymbols.length === 0) return;
+    const intervalId = setInterval(() => {
+      binanceFuturesService.fetchNextOpenInterest(perpSortedSymbols);
+    }, 300);
+    return () => clearInterval(intervalId);
+  }, [activeTab, perpSortedSymbols]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const payload = { viewMode: perpViewMode, searchQuery: perpSearchQuery };
+    localStorage.setItem(PERP_FILTERS_KEY, JSON.stringify(payload));
+  }, [perpViewMode, perpSearchQuery]);
+
+  useEffect(() => {
+    if (activeTab !== 'perp') return;
+    setPerpWidthRefreshKey((prev) => prev + 1);
+  }, [activeTab, perpViewMode, perpSearchQuery, perpDataMap.size]);
+
+  useEffect(() => {
+    if (activeTab !== 'perp' || perpViewMode !== 'favorites') return;
+    setPerpWidthRefreshKey((prev) => prev + 1);
+  }, [perpFavorites, activeTab, perpViewMode]);
 
   // Alpha Data Fetch Effect
   useEffect(() => {
@@ -397,6 +472,17 @@ const App = () => {
     setAlphaWidthRefreshKey((prev) => prev + 1);
   };
 
+  const togglePerpFavorite = (symbol: string) => {
+    setPerpFavorites((prev) => {
+      const next = new Set(prev);
+      if (next.has(symbol)) next.delete(symbol);
+      else next.add(symbol);
+      localStorage.setItem(PERP_FAVORITES_KEY, JSON.stringify(Array.from(next)));
+      return next;
+    });
+    setPerpWidthRefreshKey((prev) => prev + 1);
+  };
+
   const { availableQuoteAssets, assetCounts } = useMemo(() => {
     const allData = Array.from(tickerDataMap.values());
     const counts: Record<string, number> = { 'ALL': allData.length };
@@ -473,6 +559,34 @@ const App = () => {
     }
     return data;
   }, [alphaData, alphaViewMode, favorites, alphaSearchQuery]);
+
+  const perpWidthData = useMemo(() => Array.from(perpDataMap.values()), [perpDataMap]);
+
+  const filteredPerpData = useMemo(() => {
+    let data = Array.from(perpDataMap.values());
+    if (perpViewMode === 'favorites') {
+      data = data.filter(item => perpFavorites.has(item.symbol));
+    }
+    if (perpSearchQuery) {
+      const q = perpSearchQuery.toUpperCase();
+      data = data.filter(item => {
+        const quote = getQuoteAsset(item.symbol);
+        const base = quote ? item.symbol.substring(0, item.symbol.length - quote.length) : item.symbol;
+        return base.includes(q);
+      });
+    }
+    return data;
+  }, [perpDataMap, perpViewMode, perpFavorites, perpSearchQuery]);
+
+  const perpStats = useMemo(() => {
+    if (filteredPerpData.length === 0) return { total: 0, up: 0, down: 0 };
+    let up = 0, down = 0;
+    filteredPerpData.forEach((t) => {
+      if (t.changePercent24h > 0) up++;
+      else if (t.changePercent24h < 0) down++;
+    });
+    return { total: filteredPerpData.length, up, down };
+  }, [filteredPerpData]);
 
   const alphaStats = useMemo(() => {
     if (filteredAlphaData.length === 0) return { total: 0, up: 0, down: 0 };
@@ -826,12 +940,54 @@ const App = () => {
           </main>
         </>
       ) : (
-        /* Blank State for Perp Tab */
-        <main className="flex-1 w-full max-w-7xl mx-auto px-4 py-8">
-          <div className="h-full w-full flex items-center justify-center text-sm font-medium text-gray-400">
-            Coming Soon
+        <>
+          {/* Perp Toolbar */}
+          <div className="flex-shrink-0 w-full max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+            <div className="flex items-center space-x-3">
+              <div className="bg-gray-200 p-1 rounded-lg flex items-center">
+                <button onClick={() => setPerpViewMode('market')} className={`px-3 py-1.5 rounded-md text-sm font-medium ${perpViewMode === 'market' ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>Market</button>
+                <button onClick={() => setPerpViewMode('favorites')} className={`px-3 py-1.5 rounded-md text-sm font-medium flex items-center space-x-1 ${perpViewMode === 'favorites' ? 'bg-white shadow-sm text-yellow-600' : 'text-gray-500 hover:text-gray-700'}`}>
+                  <span>Favorites</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Right Side: Stats & Search */}
+            <div className="flex items-center gap-6">
+                <div className="flex space-x-4 text-sm whitespace-nowrap">
+                  <span className="text-gray-500">Pairs <span className="text-gray-900 font-bold ml-1">{perpStats.total}</span></span>
+                  <span className="text-green-600 font-bold">Up {perpStats.up}</span>
+                  <span className="text-red-600 font-bold">Down {perpStats.down}</span>
+                </div>
+
+                <div className="relative w-64">
+                  <input type="text" className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-200" placeholder="Search symbol..." value={perpSearchQuery} onChange={(e) => setPerpSearchQuery(e.target.value)} />
+                  <svg className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" strokeWidth={2} /></svg>
+                </div>
+            </div>
           </div>
-        </main>
+
+          {/* Perp Table */}
+          <main className="flex-1 min-h-0 w-full max-w-7xl mx-auto px-4 pb-4 overflow-hidden">
+            {perpDataMap.size === 0 ? (
+              <div className="h-full w-full flex items-center justify-center text-sm font-medium text-gray-400">
+                Loading Perp data...
+              </div>
+            ) : (
+              <VirtualTable
+                data={filteredPerpData}
+                height="100%"
+                favorites={perpFavorites}
+                onToggleFavorite={togglePerpFavorite}
+                onSortedIdsChange={setPerpSortedSymbols}
+                hiddenColumns={['change1h', 'change4h']}
+                showPerpDetails
+                widthRefreshKey={perpWidthRefreshKey}
+                widthSourceData={perpWidthData}
+              />
+            )}
+          </main>
+        </>
       )}
     </div>
   );

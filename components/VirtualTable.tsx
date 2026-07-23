@@ -20,7 +20,11 @@ type ColumnId =
   | 'volume'
   | 'change1h'
   | 'change4h'
-  | 'change24h';
+  | 'change24h'
+  | 'markPrice'
+  | 'fundingRate'
+  | 'nextFunding'
+  | 'openInterest';
 
 interface VirtualTableProps {
   data: TickerData[];
@@ -32,6 +36,7 @@ interface VirtualTableProps {
   showIconColumn?: boolean;
   showChainIconColumn?: boolean;
   showAlphaDetails?: boolean;
+  showPerpDetails?: boolean;
   columnOrder?: ColumnId[];
   widthRefreshKey?: number;
   widthSourceData?: TickerData[];
@@ -60,6 +65,10 @@ const DEFAULT_COLUMN_WIDTHS: Record<ColumnId, number> = {
   change1h: CHANGE_COLUMN_WIDTH,
   change4h: CHANGE_COLUMN_WIDTH,
   change24h: CHANGE_COLUMN_WIDTH,
+  markPrice: 120,
+  fundingRate: 110,
+  nextFunding: 128,
+  openInterest: 150,
 };
 
 // --- 格式化器 ---
@@ -71,7 +80,19 @@ const bigNumberFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigit
 const integerFormatter = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0, useGrouping: true });
 const dateFormatter = new Intl.DateTimeFormat('en-GB', { year: 'numeric', month: '2-digit', day: '2-digit' });
 
+const fundingFormatter = new Intl.NumberFormat('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4, signDisplay: 'always' });
+
 const formatPrice = (price: number) => price < 1 ? priceFormatterLow.format(price) : priceFormatterHigh.format(price);
+const formatFundingRate = (rate: number | undefined) => rate === undefined ? '-' : fundingFormatter.format(rate * 100) + '%';
+const formatCountdown = (nextFundingTime: number | undefined) => {
+  if (nextFundingTime === undefined) return '-';
+  const diff = nextFundingTime - Date.now();
+  if (diff <= 0) return 'soon';
+  const totalMinutes = Math.floor(diff / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+};
 const formatVolume = (vol: number) => volFormatter.format(vol);
 const formatPercent = (pct: number | undefined) => pct === undefined ? '-' : pctFormatter.format(pct) + '%';
 const formatBigNumber = (value: number | undefined) => value === undefined ? '-' : bigNumberFormatter.format(value);
@@ -115,6 +136,10 @@ const COLUMN_LABELS: Record<ColumnId, string> = {
   change1h: '1h',
   change4h: '4h',
   change24h: '24h',
+  markPrice: 'Mark',
+  fundingRate: 'Funding',
+  nextFunding: 'Next Funding',
+  openInterest: 'OI (USDT)',
 };
 
 // --- 图标组件 ---
@@ -151,6 +176,7 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
   showIconColumn = false,
   showChainIconColumn = false,
   showAlphaDetails = false,
+  showPerpDetails = false,
   columnOrder,
   widthRefreshKey = 0,
   widthSourceData
@@ -219,6 +245,9 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
     let maxChange1hWidth = 0;
     let maxChange4hWidth = 0;
     let maxChange24hWidth = 0;
+    let maxMarkPriceWidth = 0;
+    let maxFundingWidth = 0;
+    let maxOiWidth = 0;
 
     widthData.forEach((item) => {
       const quoteAsset = showAlphaDetails ? '' : (getQuoteAsset(item.symbol) || '');
@@ -268,7 +297,20 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
 
       const change24hWidth = measureText(formatPercent(item.changePercent24h), FONT_MONO_15);
       if (change24hWidth > maxChange24hWidth) maxChange24hWidth = change24hWidth;
+
+      const markPriceWidth = item.markPrice === undefined
+        ? 0
+        : measureText(formatPrice(item.markPrice), FONT_MONO_15);
+      if (markPriceWidth > maxMarkPriceWidth) maxMarkPriceWidth = markPriceWidth;
+
+      const fundingWidth = measureText(formatFundingRate(item.fundingRate), FONT_MONO_14);
+      if (fundingWidth > maxFundingWidth) maxFundingWidth = fundingWidth;
+
+      const oiWidth = measureText(formatVolume(item.openInterestValue ?? 0), FONT_MONO_15);
+      if (oiWidth > maxOiWidth) maxOiWidth = oiWidth;
     });
+
+    const sampleCountdownWidth = measureText('23h 59m', FONT_MONO_14);
 
     const sampleListingWidth = measureText(formatDate(Date.now()), FONT_MONO_14);
     if (sampleListingWidth > maxListingWidth) maxListingWidth = sampleListingWidth;
@@ -339,6 +381,22 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
         headerWidth(COLUMN_LABELS.listingTime, PADDING_PX_3),
         maxListingWidth + PADDING_PX_3
       ) * 1.05),
+      markPrice: Math.ceil(Math.max(
+        headerWidth(COLUMN_LABELS.markPrice, PADDING_PX_4),
+        maxMarkPriceWidth + PADDING_PX_4
+      )),
+      fundingRate: Math.ceil(Math.max(
+        headerWidth(COLUMN_LABELS.fundingRate, PADDING_PX_3),
+        maxFundingWidth + PADDING_PX_3
+      )),
+      nextFunding: Math.ceil(Math.max(
+        headerWidth(COLUMN_LABELS.nextFunding, PADDING_PX_3),
+        sampleCountdownWidth + PADDING_PX_3
+      )),
+      openInterest: Math.ceil(Math.max(
+        headerWidth(COLUMN_LABELS.openInterest, PADDING_PX_4),
+        maxOiWidth + PADDING_PX_4
+      )),
     };
 
     setColumnWidths(nextWidths);
@@ -364,6 +422,10 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
         case 'circulatingSupply': valA = a.circulatingSupply; valB = b.circulatingSupply; break;
         case 'holders': valA = a.holders; valB = b.holders; break;
         case 'listingTime': valA = a.listingTime; valB = b.listingTime; break;
+        case 'markPrice': valA = a.markPrice ?? -999; valB = b.markPrice ?? -999; break;
+        case 'fundingRate': valA = a.fundingRate ?? -999; valB = b.fundingRate ?? -999; break;
+        case 'nextFunding': valA = a.nextFundingTime ?? -999; valB = b.nextFundingTime ?? -999; break;
+        case 'openInterest': valA = a.openInterestValue ?? -999; valB = b.openInterestValue ?? -999; break;
         default: valA = 0; valB = 0;
       }
       if (valA === undefined && valB === undefined) return 0;
@@ -446,6 +508,10 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
       'holders',
       'listingTime',
       'price',
+      'markPrice',
+      'fundingRate',
+      'nextFunding',
+      'openInterest',
       'volume',
       'change1h',
       'change4h',
@@ -471,12 +537,16 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
       ];
       if (alphaOnly.includes(columnId)) return false;
     }
+    if (!showPerpDetails) {
+      const perpOnly = ['markPrice', 'fundingRate', 'nextFunding', 'openInterest'];
+      if (perpOnly.includes(columnId)) return false;
+    }
     return true;
   };
 
   const visibleColumns = useMemo(
     () => orderedColumns.filter(shouldRenderColumn),
-    [orderedColumns, hiddenColumns, showAlphaDetails, showChainIconColumn, showIconColumn]
+    [orderedColumns, hiddenColumns, showAlphaDetails, showPerpDetails, showChainIconColumn, showIconColumn]
   );
   const pinnedColumns = useMemo<ColumnId[]>(
     () => (showAlphaDetails ? ['chainIcon', 'tokenIcon', 'token'] : ['token']),
@@ -505,6 +575,13 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
       if (!isHidden('listingTime')) width += COLUMN_WIDTHS.listingTime;
     }
 
+    if (showPerpDetails) {
+      if (!isHidden('markPrice')) width += COLUMN_WIDTHS.markPrice;
+      if (!isHidden('fundingRate')) width += COLUMN_WIDTHS.fundingRate;
+      if (!isHidden('nextFunding')) width += COLUMN_WIDTHS.nextFunding;
+      if (!isHidden('openInterest')) width += COLUMN_WIDTHS.openInterest;
+    }
+
     if (!isHidden('price')) width += COLUMN_WIDTHS.price;
     if (!isHidden('volume')) width += COLUMN_WIDTHS.volume;
     if (!isHidden('change1h')) width += COLUMN_WIDTHS.change1h;
@@ -512,7 +589,7 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
     if (!isHidden('change24h')) width += COLUMN_WIDTHS.change24h;
 
     return width;
-  }, [hiddenColumns, showAlphaDetails, showChainIconColumn, showIconColumn, COLUMN_WIDTHS]);
+  }, [hiddenColumns, showAlphaDetails, showPerpDetails, showChainIconColumn, showIconColumn, COLUMN_WIDTHS]);
 
   const tableGap = useMemo(() => {
     const usableWidth = Math.max(0, tableViewportWidth - SCROLLBAR_WIDTH);
@@ -723,6 +800,58 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
                       Price <SortIcon field="price" />
                     </button>
                   );
+                case 'markPrice':
+                  return (
+                    <button
+                      key={columnId}
+                      className={`px-4 text-right hover:bg-gray-100 h-full flex items-center justify-end group transition-colors flex-shrink-0 ${
+                        pushRight ? 'ml-auto' : ''
+                      }`}
+                      style={{ width: layoutColumnWidths.markPrice }}
+                      onClick={() => handleSort('markPrice')}
+                    >
+                      Mark <SortIcon field="markPrice" />
+                    </button>
+                  );
+                case 'fundingRate':
+                  return (
+                    <button
+                      key={columnId}
+                      className={`px-3 text-right hover:bg-gray-100 h-full flex items-center justify-end group transition-colors flex-shrink-0 ${
+                        pushRight ? 'ml-auto' : ''
+                      }`}
+                      style={{ width: layoutColumnWidths.fundingRate }}
+                      onClick={() => handleSort('fundingRate')}
+                    >
+                      Funding <SortIcon field="fundingRate" />
+                    </button>
+                  );
+                case 'nextFunding':
+                  return (
+                    <button
+                      key={columnId}
+                      className={`px-3 text-right hover:bg-gray-100 h-full flex items-center justify-end group transition-colors flex-shrink-0 ${
+                        pushRight ? 'ml-auto' : ''
+                      }`}
+                      style={{ width: layoutColumnWidths.nextFunding }}
+                      onClick={() => handleSort('nextFunding')}
+                    >
+                      Next Funding <SortIcon field="nextFunding" />
+                    </button>
+                  );
+                case 'openInterest':
+                  return (
+                    <button
+                      key={columnId}
+                      className={`px-4 text-right hover:bg-gray-100 h-full flex items-center justify-end group transition-colors flex-shrink-0 ${
+                        pushRight ? 'ml-auto' : ''
+                      }`}
+                      style={{ width: layoutColumnWidths.openInterest }}
+                      onClick={() => handleSort('openInterest')}
+                    >
+                      OI (USDT) <SortIcon field="openInterest" />
+                    </button>
+                  );
                 case 'volume':
                   return (
                     <button
@@ -792,10 +921,12 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
 
                 // Construct External Links
             const alphaChain = item.chainName ? item.chainName.toLowerCase() : '';
-            const binanceUrl = showAlphaDetails && alphaChain && item.contractAddress
-              ? `https://www.binance.com/zh-CN/alpha/${alphaChain}/${item.contractAddress}?ref=SPL002`
-              : `https://www.binance.com/zh-CN/trade/${baseAsset}_${quoteAsset}?ref=SPL002&type=spot`;
-                const tradingViewUrl = `https://www.tradingview.com/chart/?symbol=BINANCE:${item.symbol}`;
+            const binanceUrl = showPerpDetails
+              ? `https://www.binance.com/zh-CN/futures/${item.symbol}?ref=SPL002`
+              : showAlphaDetails && alphaChain && item.contractAddress
+                ? `https://www.binance.com/zh-CN/alpha/${alphaChain}/${item.contractAddress}?ref=SPL002`
+                : `https://www.binance.com/zh-CN/trade/${baseAsset}_${quoteAsset}?ref=SPL002&type=spot`;
+                const tradingViewUrl = `https://www.tradingview.com/chart/?symbol=BINANCE:${item.symbol}${showPerpDetails ? '.P' : ''}`;
             const xTokenUrl = `https://x.com/search?q=${encodeURIComponent(`$${baseAsset}`)}&src=typed_query`;
             const xContractUrl = item.contractAddress
               ? `https://x.com/search?q=${encodeURIComponent(item.contractAddress)}&src=typed_query&f=top`
@@ -1036,6 +1167,58 @@ export const VirtualTable: React.FC<VirtualTableProps> = ({
                               style={{ width: layoutColumnWidths.price }}
                             >
                               {formatPrice(item.price)}
+                            </div>
+                          );
+                        case 'markPrice':
+                          return (
+                            <div
+                              key={columnId}
+                              className={`px-4 text-right font-mono text-[15px] text-gray-700 flex-shrink-0 ${
+                                pushRight ? 'ml-auto' : ''
+                              }`}
+                              style={{ width: layoutColumnWidths.markPrice }}
+                            >
+                              {item.markPrice === undefined ? '-' : formatPrice(item.markPrice)}
+                            </div>
+                          );
+                        case 'fundingRate':
+                          return (
+                            <div
+                              key={columnId}
+                              className={`px-3 text-right font-mono text-[14px] flex-shrink-0 ${
+                                item.fundingRate === undefined
+                                  ? 'text-gray-400'
+                                  : item.fundingRate >= 0
+                                    ? 'text-green-600'
+                                    : 'text-red-600'
+                              } ${pushRight ? 'ml-auto' : ''}`}
+                              style={{ width: layoutColumnWidths.fundingRate }}
+                            >
+                              {formatFundingRate(item.fundingRate)}
+                            </div>
+                          );
+                        case 'nextFunding':
+                          return (
+                            <div
+                              key={columnId}
+                              className={`px-3 text-right font-mono text-[14px] text-gray-700 flex-shrink-0 ${
+                                pushRight ? 'ml-auto' : ''
+                              }`}
+                              style={{ width: layoutColumnWidths.nextFunding }}
+                            >
+                              {formatCountdown(item.nextFundingTime)}
+                            </div>
+                          );
+                        case 'openInterest':
+                          return (
+                            <div
+                              key={columnId}
+                              className={`px-4 text-right font-mono text-[15px] text-gray-900 flex-shrink-0 ${
+                                pushRight ? 'ml-auto' : ''
+                              }`}
+                              style={{ width: layoutColumnWidths.openInterest }}
+                            >
+                              {item.openInterestValue === undefined ? '-' : formatVolume(item.openInterestValue)}
                             </div>
                           );
                         case 'volume':
