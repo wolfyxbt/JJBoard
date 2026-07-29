@@ -2,8 +2,6 @@
 
 一个基于 React + Vite 的 Binance 行情看板，实时展示现货（Spot）与 Alpha 代币行情。
 
-<img width="1728" height="957" alt="JJ Board 截图" src="https://github.com/user-attachments/assets/27afe552-f0d7-4030-abbc-5cba8bf2a722" />
-
 ## 功能
 
 ### BN Spot（现货行情）
